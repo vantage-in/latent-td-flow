@@ -3,7 +3,7 @@ from collections import defaultdict
 import jax
 import numpy as np
 from tqdm import trange
-
+from .datasets import normalize
 
 def supply_rng(f, rng=jax.random.PRNGKey(0)):
     """Helper function to split the random number generator key before each call to the function."""
@@ -37,6 +37,8 @@ def add_to(dict_of_lists, single_dict):
 def evaluate(
     agent,
     env,
+    env_name=None,
+    goal_conditioned=True,
     task_id=None,
     config=None,
     num_eval_episodes=50,
@@ -44,13 +46,16 @@ def evaluate(
     video_frame_skip=3,
     eval_temperature=0,
     eval_gaussian=None,
+    scale=None,
 ):
     """Evaluate the agent in the environment.
 
     Args:
         agent: Agent.
         env: Environment.
-        task_id: Task ID to be passed to the environment.
+        env_name: Environment name.
+        goal_conditioned: Whether to do goal-conditioned evaluation.
+        task_id: Task ID to be passed to the environment (only used when goal_conditioned is True).
         config: Configuration dictionary.
         num_eval_episodes: Number of episodes to evaluate the agent.
         num_video_episodes: Number of episodes to render. These episodes are not included in the statistics.
@@ -70,22 +75,39 @@ def evaluate(
         traj = defaultdict(list)
         should_render = i >= num_eval_episodes
 
-        observation, info = env.reset(options=dict(task_id=task_id, render_goal=should_render))
-        goal = info.get('goal')
-        goal_frame = info.get('goal_rendered')
+        score = 0.
+        if goal_conditioned:
+            observation, info = env.reset(options=dict(task_id=task_id, render_goal=should_render))
+            goal = info.get('goal')
+            goal_frame = info.get('goal_rendered')
+        else:
+            observation, info = env.reset()
+            goal = None
+            goal_frame = None
+
         done = False
         step = 0
         render = []
+        action_chunks = []
         while not done:
-            action = actor_fn(observations=observation, goals=goal, temperature=eval_temperature)
-            action = np.array(action)
-            if not config.get('discrete'):
+            if len(action_chunks) == 0:
+                observation_norm = normalize(scale['observations'], observation)
+                goal_norm = None if goal is None else normalize(scale['observation'], goal)
+                action, action_info = actor_fn(observations=observation_norm, goals=goal_norm, temperature=eval_temperature)
+                action = np.array(action)
                 if eval_gaussian is not None:
                     action = np.random.normal(action, eval_gaussian)
                 action = np.clip(action, -1, 1)
+                action_dim = env.action_space.shape[-1]
+                action_chunks = []
+                for j in range(0, action.shape[-1], action_dim):
+                    action_chunks.append(action[j:j+action_dim])
+           
+            action = action_chunks.pop(0)
 
             next_observation, reward, terminated, truncated, info = env.step(action)
             done = terminated or truncated
+            score += reward
             step += 1
 
             if should_render and (step % video_frame_skip == 0 or done):
@@ -96,18 +118,21 @@ def evaluate(
                     render.append(frame)
 
             transition = dict(
-                observation=observation,
-                next_observation=next_observation,
-                action=action,
-                reward=reward,
-                done=done,
-                info=info,
+                observations=normalize(scale['observations'], observation),
+                next_observations=normalize(scale['observations'], next_observation),
+                actions=action,
+                rewards=reward,
+                dones=done,
+                value_goals=goal_norm, #원본은 goal인데 확인 필요
+                **action_info,
             )
             add_to(traj, transition)
-            observation = next_observation
+            observation = next_observation.copy()
+
         if i < num_eval_episodes:
             add_to(stats, flatten(info))
             trajs.append(traj)
+            stats['score'].append(score) 
         else:
             renders.append(np.array(render))
 

@@ -56,6 +56,7 @@ def get_flag_dict():
     for k in flag_dict:
         if isinstance(flag_dict[k], ml_collections.ConfigDict):
             flag_dict[k] = flag_dict[k].to_dict()
+    print(flag_dict)
     return flag_dict
 
 
@@ -64,27 +65,45 @@ def setup_wandb(
     project='project',
     group=None,
     name=None,
+    wandb_id=None,
     mode='online',
 ):
     """Set up Weights & Biases for logging."""
     wandb_output_dir = tempfile.mkdtemp()
     tags = [group] if group is not None else None
 
-    init_kwargs = dict(
-        config=get_flag_dict(),
-        project=project,
-        entity=entity,
-        tags=tags,
-        group=group,
-        dir=wandb_output_dir,
-        name=name,
-        settings=wandb.Settings(
-            start_method='thread',
-            _disable_stats=False,
-        ),
-        mode=mode,
-        save_code=True,
-    )
+    if wandb_id is not None:
+        init_kwargs = dict(
+            config=get_flag_dict(),
+            project=project,
+            entity=entity,
+            group=group,
+            dir=wandb_output_dir,
+            resume='allow',
+            id=wandb_id,
+            settings=wandb.Settings(
+                start_method='thread',
+                _disable_stats=False,
+            ),
+            mode=mode,
+            save_code=True,
+        )
+
+    else:
+        init_kwargs = dict(
+            config=get_flag_dict(),
+            project=project,
+            entity=entity,
+            group=group,
+            dir=wandb_output_dir,
+            name=name,
+            settings=wandb.Settings(
+                start_method='thread',
+                _disable_stats=False,
+            ),
+            mode=mode,
+            save_code=True,
+        )
 
     run = wandb.init(**init_kwargs)
 
@@ -106,9 +125,9 @@ def reshape_video(v, n_cols=None):
         v = np.concatenate((v, np.zeros(shape=(len_addition, t, h, w, c))), axis=0)
     n_rows = v.shape[0] // n_cols
 
-    v = np.reshape(v, (n_rows, n_cols, t, h, w, c))
+    v = np.reshape(v, newshape=(n_rows, n_cols, t, h, w, c))
     v = np.transpose(v, axes=(2, 5, 0, 3, 1, 4))
-    v = np.reshape(v, (t, c, n_rows * h, n_cols * w))
+    v = np.reshape(v, newshape=(t, c, n_rows * h, n_cols * w))
 
     return v
 

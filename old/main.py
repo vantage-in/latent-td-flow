@@ -1,5 +1,3 @@
-#OMP_NUM_THREADS=8 CUDA_VISIBLE_DEVICES=8 MUJOCO_EGL_DEVICE_ID=8 EGL_DEVICE_ID=8 python main_mbpo.py --env_name=cube-single-play-singletask-task2-v0 --agent=agents/mobile.py 
-                                                        
 import glob
 import json
 import os
@@ -15,9 +13,8 @@ from absl import app, flags
 from ml_collections import config_flags
 
 from agents import agents
-from envs.env_utils import make_env_and_datasets
 # from envs.reward_utils import get_success_fn
-from utils.datasets import Dataset, ReplayBuffer, CDataset, GCDataset, HGCDataset, ACGCDataset, normalize, unnormalize
+from utils.datasets import Dataset, CDataset, GCDataset, HGCDataset, ACGCDataset, ACDataset, normalize, unnormalize
 from utils.evaluation import evaluate
 from utils.flax_utils import restore_agent, save_agent
 from utils.log_utils import CsvLogger, get_exp_name, get_flag_dict, get_wandb_video, setup_wandb
@@ -27,7 +24,8 @@ FLAGS = flags.FLAGS
 flags.DEFINE_string('job_id', '', 'Job id')
 flags.DEFINE_string('run_group', 'Debug', 'Run group.')
 flags.DEFINE_integer('seed', 0, 'Random seed.')
-flags.DEFINE_string('env_name', 'cube-single-play-singletask-task2-v0', 'Environment (dataset) name.')
+flags.DEFINE_string('env_name', 'puzzle-4x5-play-oraclerep-v0', 'Environment (dataset) name.')
+flags.DEFINE_string('env_suite', 'ogbench', 'Suite name.')
 flags.DEFINE_string('dataset_dir', None, 'Dataset directory.')
 flags.DEFINE_integer('dataset_replace_interval', 1000, 'Dataset replace interval.')
 flags.DEFINE_integer('num_datasets', None, 'Number of datasets to use.')
@@ -35,7 +33,7 @@ flags.DEFINE_string('save_dir', 'exp/', 'Save directory.')
 flags.DEFINE_string('restore_path', None, 'Restore path.')
 flags.DEFINE_integer('restore_epoch', None, 'Restore epoch.')
 
-flags.DEFINE_integer('offline_steps', 1000000, 'Number of offline steps.')
+flags.DEFINE_integer('offline_steps', 5000000, 'Number of offline steps.')
 flags.DEFINE_integer('log_interval', 10000, 'Logging interval.')
 flags.DEFINE_integer('eval_interval', 100000, 'Evaluation interval.')
 flags.DEFINE_integer('save_interval', 100000, 'Saving interval.')
@@ -45,13 +43,9 @@ flags.DEFINE_float('eval_temperature', 0, 'Actor temperature for evaluation.')
 flags.DEFINE_float('eval_gaussian', None, 'Action Gaussian noise for evaluation.')
 flags.DEFINE_integer('video_episodes', 1, 'Number of video episodes for each task.')
 flags.DEFINE_integer('video_frame_skip', 3, 'Frame skip for videos.')
-flags.DEFINE_boolean('normalize_obs', False, 'Normalize observations')
-
-flags.DEFINE_integer('mb_batch_size', 50000, 'batch size for model rollouts')
-flags.DEFINE_integer('mb_retain_epoch', 5, 'retaining for model rollouts')
-flags.DEFINE_integer('mb_rollout_freq', 1000, 'freq for model rollouts')
-flags.DEFINE_float('mb_batch_ratio', 0.75, 'ratio for model rollouts')
-
+flags.DEFINE_boolean('normalize_obs', True, 'Normalize observations')
+flags.DEFINE_boolean('use_mujoco_obs', False, 'Use mujoco obs (qpos, qvel)')
+flags.DEFINE_integer('mb_batch_size', 64, 'batch size for debugging')
 config_flags.DEFINE_config_file('agent', 'agents/sharsa.py', lock_config=False)
 
 def main(_):
@@ -85,31 +79,30 @@ def main(_):
     if FLAGS.num_datasets is not None:
         datasets = datasets[: FLAGS.num_datasets]
     dataset_idx = 0
+
+    if FLAGS.env_suite == 'ogbench':
+        from envs.env_utils import make_env_and_datasets
+        goal_conditioned = 'singletask' not in FLAGS.env_name
+
+    if FLAGS.env_suite == 'd4rl':
+        from envs.env_utils import d4rl_make_env_and_datasets as make_env_and_datasets
+        goal_conditioned = False 
+     
     env, train_dataset, val_dataset = make_env_and_datasets(FLAGS.env_name, dataset_path=datasets[dataset_idx])
-    goal_conditioned = 'singletask' not in FLAGS.env_name
 
-    # if not goal_conditioned: key - frozen_dict_keys(['observations', 'actions', 'terminals', 'valids', 'rewards', 'masks'])  
     if FLAGS.normalize_obs:
-        # print(val_dataset.keys())
-        keys_to_normalize = ['observations']
-        if 'oracle_reps' in val_dataset:
-            keys_to_normalize.append('oracle_reps')
-
+        #print(val_dataset.keys())
         scale = {
-        k: {
+          k: {
             'mean': val_dataset[k].mean(axis=0),
             'std': val_dataset[k].std(axis=0),
             'min': val_dataset[k].min(axis=0),
             'max': val_dataset[k].max(axis=0),
-        } for k in keys_to_normalize
+          } for k in ['observations', 'oracle_reps'] if k in val_dataset
         }
     else:
-        keys_to_normalize = ['observations']
-        if 'oracle_reps' in val_dataset:
-            keys_to_normalize.append('oracle_reps')
-
         scale = {
-          k: None for k in keys_to_normalize
+          k: None for k in ['observations', 'oracle_reps'] if k in val_dataset
         }
 
     # Initialize agent.
@@ -117,10 +110,11 @@ def main(_):
     np.random.seed(FLAGS.seed)
 
     dataset_class_dict = {
-        'CDataset': CDataset,
         'GCDataset': GCDataset,
         'HGCDataset': HGCDataset,
         'ACGCDataset': ACGCDataset,
+        'ACDataset': ACDataset,
+        'CDataset': CDataset,
     }
     dataset_class = dataset_class_dict[config['dataset_class']]
     train_dataset = dataset_class(Dataset.create(scale=scale, **train_dataset), config)
@@ -151,41 +145,35 @@ def main(_):
     first_time = time.time()
     last_time = time.time()
 
-    rng = jax.random.PRNGKey(FLAGS.seed)
-    fake_data = defaultdict(list)
-    for _ in range(FLAGS.mb_retain_epoch):
-        rng, rollout_rng = jax.random.split(rng)
-        batch = train_dataset.sample(FLAGS.mb_batch_size)
-        fake_batch = agent.rollout(batch, rollout_rng)
-        for k, v in fake_batch.items():
-            fake_data[k].append(v)
-    fake_data = {k: np.concatenate(v, axis=0) for k, v in fake_data.items()}
-    fake_buffer = ReplayBuffer(Dataset.create(scale=scale, **fake_data))
-    fake_buffer.size = fake_buffer.max_size
-
+    metric_rng = jax.random.PRNGKey(FLAGS.seed)
     for i in tqdm.tqdm(range(epoch+1, FLAGS.offline_steps + 1), smoothing=0.1, dynamic_ncols=True):
-        if i % FLAGS.mb_rollout_freq == 0:
-            rng, rollout_rng = jax.random.split(rng)
-            batch = train_dataset.sample(FLAGS.mb_batch_size)
-            fake_batch = agent.rollout(batch, rollout_rng)
-            fake_buffer.add_batch(fake_batch)
-
-        real_batch_size = int(config['batch_size'] * FLAGS.mb_batch_ratio)
-        fake_batch_size = config['batch_size'] - real_batch_size
-        real_batch = train_dataset.sample(real_batch_size)
-        fake_batch = fake_buffer.sample(fake_batch_size)
-        agent, update_info = agent.update(real_batch, fake_batch)
+        batch = train_dataset.sample(config['batch_size'])
+        agent, update_info = agent.update(batch)
 
         # Log metrics.
         if i == 1 or i % FLAGS.log_interval == 0:
             if hasattr(agent, 'compute_metrics'):
-                rng, key = jax.random.split(rng)
-                add_metrics = agent.compute_metrics(real_batch, fake_batch, rng=key)
+                metric_rng, key = jax.random.split(metric_rng)
+                add_metrics = agent.compute_metrics(batch, rng=key)
                 update_info.update({f'metrics/{k}': v for k, v in add_metrics.items()})
+
+            ## Only for model rollout accuracy analysis in the ablation study
+            if hasattr(agent, 'rollout_metrics'):
+                metric_rng, key = jax.random.split(metric_rng)
+                rollout_batch = train_dataset.sample_consecutive(15, 150 // config['action_chunking'])
+                rollout_metrics = agent.rollout_metrics(rollout_batch, rng=key)
+                rollout_metrics = {k: np.array(v) for k,v in rollout_metrics.items()}
+                for k, v in rollout_metrics.items():
+                    if isinstance(v, float): 
+                        update_info.update({f'metrics/rollout/{k}': v})
+                    else:
+                        for t, val in enumerate(v):
+                            update_info.update({f'metrics/rollout/{k}_{t * config["action_chunking"]}': val})
+
             train_metrics = {f'training/{k}': v for k, v in update_info.items()}
 
-            val_batch = val_dataset.sample(real_batch_size)
-            _, val_info = agent.total_loss(val_batch, fake_batch, grad_params=None)
+            val_batch = val_dataset.sample(config['batch_size'])
+            _, val_info = agent.total_loss(val_batch, grad_params=None)
             train_metrics.update({f'validation/{k}': v for k, v in val_info.items()})
 
             train_metrics['time/epoch_time'] = (time.time() - last_time) / FLAGS.log_interval
@@ -199,7 +187,6 @@ def main(_):
             renders = []
             eval_metrics = {}
             overall_metrics = defaultdict(list)
-
             if goal_conditioned: 
                 task_infos = env.unwrapped.task_infos if hasattr(env.unwrapped, 'task_infos') else env.task_infos
                 num_tasks = len(task_infos)
@@ -251,15 +238,13 @@ def main(_):
                     scale=scale,
                 )
                 renders.extend(cur_renders)
-                # metric_names = ['success', 'dynamics_loss', 'state_loss', 'value_loss']
-                # eval_metrics.update(
-                #     {f'evaluation/{k}': v for k, v in eval_info.items() if k in metric_names}
-                # )
-                # for k, v in eval_info.items():
-                #     if k in metric_names:
-                #         eval_metrics[f'evaluation/{k}'] = v
+                metric_names = ['success', 'dynamics_loss', 'state_loss', 'value_loss']
+                eval_metrics.update(
+                    {f'evaluation/{k}': v for k, v in eval_info.items() if k in metric_names}
+                )
                 for k, v in eval_info.items():
-                    eval_metrics[f'evaluation/{k}'] = v
+                    if k in metric_names:
+                        eval_metrics[f'evaluation/{k}'] = v
 
                 if FLAGS.video_episodes > 0:
                     video = get_wandb_video(renders=renders, n_cols=1)
