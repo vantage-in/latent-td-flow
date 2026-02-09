@@ -22,7 +22,7 @@ Flow Matching 모델을 학습시키기 위해 타겟 샘플 $Z$를 생성해야
 
 $$Z \sim (1-\gamma)\delta_{z'} + \gamma \delta_{\tilde{z}_{future}}$$
 
-여기서 $\tilde{z}_{future}$는 현재 학습 중인 Vector Field $v_\theta$를 따라 $z'$에서 시간 $t=1$까지 적분(ODE Solve)한 결과입니다.
+여기서 $\tilde{z}\_{future}$는 현재 학습 중인 Vector Field $v\_\theta$를 따라 $z'$에서 시간 $t=1$까지 적분(ODE Solve)한 결과입니다.
 
 $$\tilde{z}_{future} = z' + \int_{0}^{1} v_\theta(z(\tau), \tau | z', z_g) d\tau, \quad \text{where } z(0)=z'$$
 
@@ -41,7 +41,7 @@ $$\tilde{z}_{future} = z' + \int_{0}^{1} v_\theta(z(\tau), \tau | z', z_g) d\tau
 ## 3. 알고리즘 및 네트워크 구조 (Algorithm & Architecture)
 ### 3.1 네트워크 구성
 * **Encoder** ($\phi$): Impala CNN (입력 $s \to$ 출력 $z \in \mathbb{R}^D$). 
-  * **Default**: **Separate Encoders** (`separate_encoders=True`). State와 Goal에 대해 별도의 Encoder를 사용하여 Metric 불일치 문제를 완화합니다 ($\phi(s) \neq \psi(g)$).
+  * **Default**: **Separate Encoders** (`separate_encoders=True`). State와 Goal에 대해 별도의 Encoder를 사용하여 Metric 불일치 문제를 완화합니다. $(\phi(s) \neq \psi(g))$
   * **Option**: Siamese Encoder. 만약 데이터셋 특성상 State/Goal 도메인 차이가 크지 않다면 `separate_encoders=False`로 설정하여 파라미터를 공유할 수 있습니다.
 * **Flow Model** ($v_\theta$): MLP 구조 (Action 입력 없음).
   * Input: Noised Latent $z_t$, Time $t$, Condition $C = [z_{next}, z_{goal}]$
@@ -65,7 +65,7 @@ TD-Flow의 핵심인 Bootstrapping을 통해 타겟 $Z$를 생성합니다.
 * **확률 $1-\gamma$**: 타겟을 다음 상태인 $z'$으로 설정합니다 ($Z = z'$).
 * **확률 $\gamma$**: 현재 모델 $v_\theta$를 사용하여 $z'$에서 더 미래로 진행시킨 예측값 $\tilde{z}_{future}$를 타겟으로 설정합니다.
 
-$$\tilde{z}_{future} = \text{ODE\_Solve}(v_\theta, \text{start}=z', \text{cond}=[z', z_g])$$
+$$\tilde{z}_{future} = \text{ODE\\_Solve}(v_\theta, \text{start}=z', \text{cond}=[z', z_g])$$
 
 * **참고**: $s=g$일 때의 Absorbing State 처리 로직은 선택 사항이며, 자세한 내용은 구현 디테일(4.3절)에서 설명합니다.
 
@@ -74,7 +74,8 @@ $$\tilde{z}_{future} = \text{ODE\_Solve}(v_\theta, \text{start}=z', \text{cond}=
 * Time $t \sim \mathcal{U}[0, 1]$ 샘플링.
 * Interpolation: $z_t = t Z + (1-t) z_0$
 * Loss: 모델 $v_\theta$가 직선 경로의 속도 $(Z - z_0)$를 예측하도록 학습.
-  $$\mathcal{L}_{TD-Flow} = || v_\theta(z_t, t | z_s, z_g) - (Z - z_0) ||^2$$
+
+$$\mathcal{L}_{TD-Flow} = || v_\theta(z_t, t | z_s, z_g) - (Z - z_0) ||^2$$
 
 #### Step 5: Update
 Optimizer를 통해 $\phi$와 $v_\theta$를 동시에 업데이트.
