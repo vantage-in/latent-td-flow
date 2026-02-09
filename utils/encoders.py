@@ -4,7 +4,7 @@ from typing import Sequence
 import flax.linen as nn
 import jax.numpy as jnp
 
-from utils.networks import MLP
+from utils.networks import MLP, LengthNormalize
 
 
 class ResnetStack(nn.Module):
@@ -66,6 +66,7 @@ class ImpalaEncoder(nn.Module):
     dropout_rate: float = None
     mlp_hidden_dims: Sequence[int] = (512,)
     layer_norm: bool = False
+    final_norm: str = None # 'tanh', 'layernorm', 'l2', or None
 
     def setup(self):
         stack_sizes = self.stack_sizes
@@ -95,7 +96,18 @@ class ImpalaEncoder(nn.Module):
             conv_out = nn.LayerNorm()(conv_out)
         out = conv_out.reshape((*x.shape[:-3], -1))
 
+
         out = MLP(self.mlp_hidden_dims, activate_final=True, layer_norm=self.layer_norm)(out)
+
+        if self.final_norm == 'tanh':
+            out = nn.tanh(out)
+        elif self.final_norm == 'layernorm':
+            out = nn.LayerNorm()(out)
+        elif self.final_norm == 'layernorm_tanh':
+            out = nn.LayerNorm()(out)
+            out = nn.tanh(out)
+        elif self.final_norm == 'l2':
+            out = LengthNormalize()(out)
 
         return out
 

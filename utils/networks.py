@@ -60,6 +60,62 @@ class MLP(nn.Module):
         return x
 
 
+class FlowModel(nn.Module):
+    """Flow model (Vector Field).
+
+    Attributes:
+        hidden_dims: Hidden layer dimensions.
+        latent_dim: Latent dimension.
+        layer_norm: Whether to apply layer normalization.
+    """
+
+    hidden_dims: Sequence[int]
+    latent_dim: int
+    layer_norm: bool = False
+
+    @nn.compact
+    def __call__(self, z_t, t, z_s, z_g):
+        """Return the velocity.
+
+        Args:
+            z_t: Noised latent.
+            t: Time.
+            z_s: Current latent state (condition).
+            z_g: Goal latent state (condition).
+        """
+        # Concatenate inputs: z_t, t, z_s, z_g
+        # t is (batch,) or (batch, 1), expand to match batch size
+        if t.ndim == 0:
+            t = jnp.expand_dims(t, axis=0)
+        if t.ndim == 1:
+            t = jnp.expand_dims(t, axis=-1)
+
+        inputs = jnp.concatenate([z_t, t, z_s, z_g], axis=-1)
+        
+        # Use MLP to predict velocity
+        out = MLP(self.hidden_dims, activate_final=False, layer_norm=self.layer_norm)(inputs)
+        
+        # Project to latent_dim
+        velocity = nn.Dense(self.latent_dim, kernel_init=default_init())(out)
+        
+        return velocity
+
+
+class RewardModel(nn.Module):
+    """Auxiliary Reward Model.
+
+    Predicts p(reward | z_s, z_g).
+    """
+    hidden_dims: Sequence[int]
+    layer_norm: bool = False
+
+    @nn.compact
+    def __call__(self, z_s, z_g):
+        inputs = jnp.concatenate([z_s, z_g], axis=-1)
+        out = MLP(self.hidden_dims, activate_final=True, layer_norm=self.layer_norm)(inputs)
+        logits = nn.Dense(1, kernel_init=default_init())(out)
+        return logits.squeeze(-1)
+
 class LengthNormalize(nn.Module):
     """Length normalization layer.
 

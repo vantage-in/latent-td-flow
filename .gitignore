@@ -12,3 +12,8 @@ make_sbatch
 exp
 ipynbs
 data
+old
+tests
+debug*
+verify*
+run*

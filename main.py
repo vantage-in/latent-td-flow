@@ -20,6 +20,7 @@ from utils.log_utils import CsvLogger, get_exp_name, get_flag_dict, get_wandb_vi
 FLAGS = flags.FLAGS
 
 flags.DEFINE_string('run_group', 'Debug', 'Run group.')
+flags.DEFINE_string('run_name', None, 'Run name.')
 flags.DEFINE_integer('seed', 0, 'Random seed.')
 flags.DEFINE_string('env_name', 'antmaze-large-navigate-v0', 'Environment (dataset) name.')
 flags.DEFINE_string('save_dir', 'exp/', 'Save directory.')
@@ -44,7 +45,10 @@ config_flags.DEFINE_config_file('agent', 'agents/gciql.py', lock_config=False)
 
 def main(_):
     # Set up logger.
-    exp_name = get_exp_name(FLAGS.seed)
+    if FLAGS.run_name is not None:
+        exp_name = FLAGS.run_name
+    else:
+        exp_name = get_exp_name(FLAGS.seed)
     setup_wandb(project='OGBench', group=FLAGS.run_group, name=exp_name)
 
     FLAGS.save_dir = os.path.join(FLAGS.save_dir, wandb.run.project, FLAGS.run_group, exp_name)
@@ -61,6 +65,12 @@ def main(_):
         'GCDataset': GCDataset,
         'HGCDataset': HGCDataset,
     }[config['dataset_class']]
+    
+    # Propagate train_steps to config for LR decay (0.5 * train_steps)
+    if 'lr_decay' in config and config['lr_decay']:
+        if config.get('decay_steps') is None:
+            config['decay_steps'] = int(FLAGS.train_steps * 0.5)
+
     train_dataset = dataset_class(Dataset.create(**train_dataset), config)
     if val_dataset is not None:
         val_dataset = dataset_class(Dataset.create(**val_dataset), config)
@@ -101,7 +111,7 @@ def main(_):
             train_metrics = {f'training/{k}': v for k, v in update_info.items()}
             if val_dataset is not None:
                 val_batch = val_dataset.sample(config['batch_size'])
-                _, val_info = agent.total_loss(val_batch, grad_params=None)
+                _, val_info = agent.total_loss(grad_params=None, batch=val_batch)
                 train_metrics.update({f'validation/{k}': v for k, v in val_info.items()})
             train_metrics['time/epoch_time'] = (time.time() - last_time) / FLAGS.log_interval
             train_metrics['time/total_time'] = time.time() - first_time
@@ -135,12 +145,20 @@ def main(_):
                 )
                 renders.extend(cur_renders)
                 metric_names = ['success']
-                eval_metrics.update(
-                    {f'evaluation/{task_name}_{k}': v for k, v in eval_info.items() if k in metric_names}
-                )
                 for k, v in eval_info.items():
                     if k in metric_names:
+                        eval_metrics[f'evaluation/{task_name}_{k}'] = v
                         overall_metrics[k].append(v)
+                    elif k.startswith('eval/') or k == 'video':
+                         # Log specific visualization keys directly (not aggregated yet, or handle overlapping?)
+                         # If multiple tasks produce the same image key, last one wins.
+                         # Better to prefix?
+                         eval_metrics[f'evaluation/{task_name}/{k}'] = v
+                         
+                         # Also add to overall if it's a scalar?
+                         if isinstance(v, (int, float, np.number)):
+                             overall_metrics[k].append(v)
+
             for k, v in overall_metrics.items():
                 eval_metrics[f'evaluation/overall_{k}'] = np.mean(v)
 

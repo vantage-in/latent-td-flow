@@ -222,14 +222,14 @@ class GCDataset:
             batch['observations'] = self.get_observations(idxs)
             batch['next_observations'] = self.get_observations(idxs + 1)
 
-        value_goal_idxs = self.sample_goals(
+        value_goal_idxs, value_feasible_mask = self.sample_goals(
             idxs,
             self.config['value_p_curgoal'],
             self.config['value_p_trajgoal'],
             self.config['value_p_randomgoal'],
             self.config['value_geom_sample'],
         )
-        actor_goal_idxs = self.sample_goals(
+        actor_goal_idxs, _ = self.sample_goals(
             idxs,
             self.config['actor_p_curgoal'],
             self.config['actor_p_trajgoal'],
@@ -239,6 +239,7 @@ class GCDataset:
 
         batch['value_goals'] = self.get_observations(value_goal_idxs)
         batch['actor_goals'] = self.get_observations(actor_goal_idxs)
+        batch['value_feasible_mask'] = value_feasible_mask
         successes = (idxs == value_goal_idxs).astype(float)
         batch['masks'] = 1.0 - successes
         batch['rewards'] = successes - (1.0 if self.config['gc_negative'] else 0.0)
@@ -270,15 +271,20 @@ class GCDataset:
             ).astype(int)
         if p_curgoal == 1.0:
             goal_idxs = idxs
+            mask = np.ones(batch_size, dtype=np.float32)
         else:
+            is_traj = np.random.rand(batch_size) < p_trajgoal / (1.0 - p_curgoal)
             goal_idxs = np.where(
-                np.random.rand(batch_size) < p_trajgoal / (1.0 - p_curgoal), traj_goal_idxs, random_goal_idxs
+                is_traj, traj_goal_idxs, random_goal_idxs
             )
+            mask = is_traj.astype(np.float32)
 
             # Goals at the current state.
-            goal_idxs = np.where(np.random.rand(batch_size) < p_curgoal, idxs, goal_idxs)
+            is_cur = np.random.rand(batch_size) < p_curgoal
+            goal_idxs = np.where(is_cur, idxs, goal_idxs)
+            mask = np.where(is_cur, 1.0, mask)
 
-        return goal_idxs
+        return goal_idxs, mask
 
     def augment(self, batch, keys):
         """Apply image augmentation to the given keys."""
@@ -339,7 +345,7 @@ class HGCDataset(GCDataset):
             batch['next_observations'] = self.get_observations(idxs + 1)
 
         # Sample value goals.
-        value_goal_idxs = self.sample_goals(
+        value_goal_idxs, value_feasible_mask = self.sample_goals(
             idxs,
             self.config['value_p_curgoal'],
             self.config['value_p_trajgoal'],
@@ -347,6 +353,7 @@ class HGCDataset(GCDataset):
             self.config['value_geom_sample'],
         )
         batch['value_goals'] = self.get_observations(value_goal_idxs)
+        batch['value_feasible_mask'] = value_feasible_mask
 
         successes = (idxs == value_goal_idxs).astype(float)
         batch['masks'] = 1.0 - successes

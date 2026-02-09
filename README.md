@@ -35,32 +35,31 @@ $$\tilde{z}_{future} = z' + \int_{0}^{1} v_\theta(z(\tau), \tau | z', z_g) d\tau
 ## 3. 알고리즘 및 네트워크 구조 (Algorithm & Architecture)
 ### 3.1 네트워크 구성
 * **Encoder** ($\phi$): Impala CNN (입력 $s \to$ 출력 $z \in \mathbb{R}^D$). 
-  * **Default**: State와 Goal에 가중치 공유(Siamese) 적용 ($z_s = \phi(s), z_g = \phi(g)$).
-  * **Backup Plan**: 만약 Metric 불일치가 심하다면, State/Goal Encoder를 분리($\phi_{state} \neq \phi_{goal}$)하는 방안 고려.
+  * **Default**: **Separate Encoders** (`separate_encoders=True`). State와 Goal에 대해 별도의 Encoder를 사용하여 Metric 불일치 문제를 완화합니다 ($\phi(s) \neq \psi(g)$).
+  * **Option**: Siamese Encoder. 만약 데이터셋 특성상 State/Goal 도메인 차이가 크지 않다면 `separate_encoders=False`로 설정하여 파라미터를 공유할 수 있습니다.
 * **Flow Model** ($v_\theta$): MLP 구조 (Action 입력 없음).
-  * Input: Noised Latent $z_t$, Time $t$, Condition $C = [z_{current}, z_{goal}]$
+  * Input: Noised Latent $z_t$, Time $t$, Condition $C = [z_{next}, z_{goal}]$
   * Output: Velocity $\dot{z} \in \mathbb{R}^D$
-### 3.2 학습 프로세스 (Concurrent Training Loop)
+### 3.2 학습 프로세스 & Loss (Concurrent Training Loop)
 배치 데이터 $\mathcal{B} = {(s, s', g_{orig}, \text{done})}$에 대해 다음 과정을 수행합니다.
-#### Step 1: Hindsight Goal Relabeling (HER 100%) 
-* Discriminator나 Reward Predictor를 사용하지 않으므로, 데이터 정합성을 위해 HER 비율을 100%로 설정합니다.
-* 즉, 배치의 모든 샘플에서 $g$를 해당 궤적의 미래 상태 $s_{future}$로 덮어씌워, $(s, s')$ 이동이 반드시 $g$를 향한 경로가 되도록 만듭니다.
+
+#### Step 1: Goal Relabeling & Masking
+* **Relabeling**: 배치 내의 목표 $g$를 Hindsight Goal($s_{future}$)과 Random Sample로 혼합하여 구성합니다.
+* **Masking Strategy**:
+    * **Actor & Auxiliary Loss**: 표현력 학습 및 일반화를 위해 전체 배치(Positive + Negative Samples)를 모두 사용합니다.
+    * **Flow Loss ($v_\theta$)**: 유효한 궤적에 대한 Velocity Field를 학습해야 하므로, HER로 리레이블링된 Trajectory Sample에 대해서만 마스킹을 적용하여 손실 함수를 계산합니다.
+
 #### Step 2: Latent Encoding & Condition Setup
 * $z_s = \phi(s)$
 * $z_g = \phi(g)$
 * $z' = \text{sg}(\phi(s'))$  (Target Encoder는 Stop Gradient)
 
-#### Step 3: Target $Z$ 생성 (Bootstrapping with refined Absorbing Logic)
-목표에 도달했거나 에피소드가 끝난 경우를 정교하게 처리합니다.
-* **Case A: 현재 상태가 이미 목표임 ($s=g$)**
-  $$Z = z_s$$ 
-  (더 이상 움직이지 않고 현재 상태 유지)
-* **Case B: 다음 상태에서 목표 도달 ($s'=g$) 또는 종료 (done)**
-  $$Z = z'$$ 
-  (다음 스텝까지만 가고 멈춤)
-* **Case C: 계속 진행 (Bootstrapping)**
-  $$Z = \begin{cases} z' & \text{if } \text{random} < (1-\gamma) \\ \text{ODE\_Solve}(v_\theta, \text{start}=z', \text{cond}=[z', z_g]) & \text{if } \text{random} \ge (1-\gamma) \end{cases}$$
-  (주의: ODE Solver는 $z'$에서 출발하여 $t=1$까지 적분)
+#### Step 3: Target $Z$ 생성 (Bootstrapping)
+TD-Flow의 핵심인 Bootstrapping을 통해 타겟 $Z$를 생성합니다.
+* **확률 $1-\gamma$**: 타겟을 다음 상태인 $z'$으로 설정합니다 ($Z = z'$).
+* **확률 $\gamma$**: 현재 모델 $v_\theta$를 사용하여 $z'$에서 더 미래로 진행시킨 예측값 $\tilde{z}_{future}$를 타겟으로 설정합니다.
+  $$\tilde{z}_{future} = \text{ODE\_Solve}(v_\theta, \text{start}=z', \text{cond}=[z', z_g])$$
+* **참고**: $s=g$일 때의 Absorbing State 처리 로직은 선택 사항이며, 자세한 내용은 구현 디테일(4.3절)에서 설명합니다.
 
 #### Step 4: Flow Matching Loss 계산
 * Source Noise $z_0 \sim \mathcal{N}(0, I)$ 샘플링.
@@ -73,96 +72,31 @@ $$\tilde{z}_{future} = z' + \int_{0}^{1} v_\theta(z(\tau), \tau | z', z_g) d\tau
 Optimizer를 통해 $\phi$와 $v_\theta$를 동시에 업데이트.
 
 ## 4. 구현 디테일 (Implementation Details)
-#### 1. HER 100%의 의미:
+#### 1. Flow Model HER 100%의 의미:
 Action Condition이 없기 때문에, 데이터셋의 $a'$이 목표 $g$와 무관하다면 모델은 혼란에 빠집니다.
-HER을 100%로 설정하면, 모든 $(s, s')$ 전이는 (재설정된) 목표 $g$로 가는 유효한 경로가 되므로, 모델은 **Trajectory Consistency (궤적 일관성)**를 학습하게 됩니다.
-#### 2. No Auxiliary Loss (Initial Phase):
-Reward/Mask Prediction은 제외합니다.
-100% HER과 Absorbing State 로직, 그리고 Siamese 구조가 Latent Space를 자연스럽게 정렬해줄 것으로 기대합니다.
-#### 3. Absorbing State Check:
-Latent Space 상에서 $s=g$를 판별하기 어려우므로, 데이터셋의 메타데이터(좌표 등)나 Dataset Index를 활용하여 `is_goal(s)`를 정확히 판별해야 합니다.
-#### 4. Collapse Monitoring (Backup Plan):
-* 학습 중 Latent Vector들의 분산(Variance)을 로깅합니다. 만약 분산이 0으로 수렴(Representation Collapse)한다면, 
-  * Discriminator (Classification Loss: $s=g$ vs $s \neq g$)를 추가하여 Regularization을 수행합니다.
-  * 또는 VAE처럼 Reconstruction loss나 latent regularization을 직접적으로 수행할 수도 있습니다.
-  * 또는 VAE처럼 encoder 학습 시 stochastic을 추가할 수도 있습니다.
-* State와 Goal에서 다른 네트워크를 사용할 수도 있습니다. ($\psi$ for Goal)
-  * 정보량의 차이: 만약 Goal 이미지는 항상 깨끗한 정면 뷰이고, State 이미지는 노이즈가 심하거나 시점이 꼬인 뷰라면, 서로 다른 특징을 추출해야 할 수도 있습니다. 이럴 땐 네트워크를 분리하여 각자 도메인에 특화된 처리를 하게 할 수 있습니다.
-  * 역할의 차이: State는 "현재의 물리적 상황(속도, 장애물 등)"을 다 담아야 하지만, Goal은 "위치 정보"만 중요할 수 있습니다. 네트워크를 분리하면 Goal Encoder가 불필요한 정보를 과감히 버리고 위치 정보만 남기도록 유도할 수 있습니다.
-  * Metric 불일치: 가장 큰 문제입니다. 이상적으로는 $s=g$일 때 Latent 거리 $||z_s - z_g||$는 0이 되어야 합니다. 하지만 네트워크가 다르면, 똑같은 이미지를 넣어도 $z_s \neq z_g$가 되어버립니다.
-  * 학습 비효율: 비슷한 이미지 처리 능력을 두 번 따로 배워야 하므로 샘플 효율성이 떨어집니다.
-* Latent Diffusion을 참고하여 state 등을 normalization할 필요성을 확인해보는 것도 필요합니다.
-#### 5. Downstream Task:
-RL Agent(Actor-Critic) 학습은 이 루프 안에서 `z.detach()`를 입력으로 받아 Concurrent하게 수행합니다. (Encoder 학습에는 관여하지 않음)
+HER을 100%로 설정하면, 모든 $(s, s')$ 전이는 (재설정된) 목표 $g$로 가는 유효한 경로가 되므로, 모델은 **Trajectory Consistency**를 학습하게 됩니다.
+#### 2. Auxiliary Losses (Latent Regularization):
+Latent Space의 품질 향상을 위해 보조 Loss들을 도입했습니다.
+*   **Reward Loss** (`aux_loss_coef=0.1`): $z_s$와 $z_g$를 입력으로 받아 $s=g$ 여부를 예측(BCE)합니다. 이는 Latent Space 상에서 Goal과 Non-Goal 상태를 명확히 구분하도록 돕습니다.
+*   **Orthogonality Loss** (`ortho_coef`): Latent Dimension 간의 상관관계를 줄여(Decorrelation) 표현력을 극대화합니다.
+*   **Contrastive Loss** (`contrastive_coef`): InfoNCE Loss를 사용하여 $(s, g)$ 페어(Positive)는 가깝게, 그 외(Negative)는 멀어지도록 학습합니다.
+#### 3. Absorbing State & Target Encoder:
+*   `use_absorbing_state=False` (Default): Absorbing State 로직 대신, 더 간단한 Bootstrapping 방식을 기본으로 사용합니다. 단순화된 로직이 안정적인 학습에 유리할 수 있습니다.
+*   `use_target_encoder=True` (Default): 타겟값 계산 시 Target Network(EMA)를 사용하여 학습 안정성을 높입니다.
+#### 4. Learning Rate Decay:
+Representation LearningPart(`encoder`, `flow_model`)에 대해 Cosine Decay Scheduler를 적용(`lr_decay=True`)하여, 학습 후반부의 안정적인 수렴을 유도합니다.
 
+## 5. 주요 설정 플래그 (Configuration Flags)
+`agents/latent_td_flow.py` 및 `agents/latent_td_flow_gciql.py`의 `get_config()`에서 확인 가능한 주요 하이퍼파라미터입니다.
 
-# Scaling Offline Model-Based RL with Action chunking
+| Flag | Default | Description |
+| :--- | :--- | :--- |
+| `separate_encoders` | `True` | State와 Goal Encoder 분리 여부. |
+| `aux_loss_coef` | `0.1` | Auxiliary Reward Loss (Success Prediction) 가중치. |
+| `ortho_coef` | `1e-5` | Orthogonality Regularization 가중치. |
+| `contrastive_coef` | `0.05` | Contrastive (InfoNCE) Loss 가중치. |
+| `lr_decay` | `True` | Representation Learning 파트에 대한 LR Decay 적용 여부. |
+| `decay_steps` | `2e5` | LR Decay가 적용되는 총 스텝 수. |
+| `use_absorbing_state` | `False` | Absorbing State ($s=g \implies Z=s$) 로직 사용 여부. |
+| `use_target_encoder` | `True` | Target Value 계산 시 Target Encoder (EMA) 사용 여부. |
 
-This repository contains the official implementation of [Scalable Offline Model-Based RL with Action chunking](TODO).
-
-If you use this code for your research, please consider citing our paper:
-```
-@article{park2025_MAC,
-  title={Scalable Offline Model-Based RL with Action Chunking},
-  author={Kwanyoung Park, Seohong Park, Youngwoon Lee, Sergey Levine},
-  journal={arXiv Preprint},
-  year={2025}
-}
-```
-
-## Overview
-This codebase contains implementations of 1) model-free methods, 2) model-based methods, 3) MAC, and ablated version of MAC for ablation studies. Specifically: 
-
-```
-# Baselines (Model-free)
-from agents.gciql import GCIQLAgent         # GCIQL
-from agents.ngcsacbc import NGCSACBCAgent   # n-step GCSAC+BC
-from agents.sharsa import SHARSAAgent       # SHARSA
-
-# Baselines (Model-based)
-from agents.fmpc import FMPCAgent           # FMPC
-from agents.leq import LEQAgent             # LEQ
-from agents.mopo import MOPOAgent           # MOPO
-from agents.mobile import MOBILEAgent       # MOBILE
-
-# Our method (MAC)
-from agents.mac import MACAgent             # MAC
-from agents.mbrs_ac import ACMBRSAgent      # MAC (Gau)
-from agents.mbfql import MBFQLAgent         # MAC (FQL)
-from agents.model_ac import ACModelAgent    # Model inaccuracy analysis
-```
-
-## Installation
-
-Please install the libraries using `requirements.txt`:
-
-```bash
-pip install -r requirements.txt
-```
-
-## Datasets
-
-For downloading the datasets, please follow the instruction of [Horizon Reduction Makes RL Scalable](https://github.com/seohongpark/horizon-reduction).
-
-## Example training scripts 
-
-For MVE-based MBRL algorithms (MAC, LEQ, FMPC) and model-free RL algorithms (SHARSA, GCIQL, n-step GCSAC+BC):
-
-```
-# MAC in puzzle-4x5-play-oraclerep-v0 (100M)
-python main.py --env_name=puzzle-4x5-play-oraclerep-v0 --dataset_dir=<YOUR_DATA_DIRECTORY>/puzzle-4x5-play-100m-v0 --agent=agents/mac.py
-
-# SHARSA in puzzle-4x5-play-oraclerep-v0 (100M)
-python main.py --env_name=puzzle-4x5-play-oraclerep-v0 --dataset_dir=<YOUR_DATA_DIRECTORY>/puzzle-4x5-play-100m-v0 --agent=agents/sharsa.py
-```
-
-For MBPO-based algorithms (MOPO, MOBILE):
-
-```
-# MOPO in puzzle-4x5-play-oraclerep-v0 (100M)
-python main_mbpo.py --env_name=puzzle-4x5-play-oraclerep-v0 --dataset_dir=<YOUR_DATA_DIRECTORY>/puzzle-4x5-play-100m-v0 --agent=agents/mopo.py
-```
-
-## Acknowledgement
-
-This codebase is built on top of [Horizon Reduction makes RL scalable](https://github.com/seohongpark/horizon-reduction)'s codebase.

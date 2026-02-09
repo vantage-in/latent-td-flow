@@ -123,7 +123,7 @@ class GCIQLAgent(flax.struct.PyTreeNode):
             raise ValueError(f'Unsupported actor loss: {self.config["actor_loss"]}')
 
     @jax.jit
-    def total_loss(self, batch, grad_params, rng=None):
+    def total_loss(self, grad_params, batch, rng=None):
         """Compute the total loss."""
         info = {}
         rng = rng if rng is not None else self.rng
@@ -159,7 +159,7 @@ class GCIQLAgent(flax.struct.PyTreeNode):
         new_rng, rng = jax.random.split(self.rng)
 
         def loss_fn(grad_params):
-            return self.total_loss(batch, grad_params, rng=rng)
+            return self.total_loss(grad_params, batch, rng=rng)
 
         new_network, info = self.network.apply_loss_fn(loss_fn=loss_fn)
         self.target_update(new_network, 'critic')
