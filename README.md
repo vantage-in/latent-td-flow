@@ -8,7 +8,10 @@
 ## 2. 이론적 배경 (Theoretical Background: TD-Flow & Adaptation)
 이 섹션은 TD-Flow 논문의 핵심 개념과 수식을 본 프로젝트(Latent Space & Action-Free)에 맞게 재정의한 것입니다.
 ### 2.1 Geometric Horizon Model (GHM)
-우리가 학습하고자 하는 것은 일반적인 Next-step Dynamics가 아니라, 할인율 $\gamma$가 적용된 미래 방문 상태 분포인 Successor Measure (SM) 입니다.$$M(s, g) = (1-\gamma) \delta_{s'} + \gamma \mathcal{T} M(s', g)$$
+우리가 학습하고자 하는 것은 일반적인 Next-step Dynamics가 아니라, 할인율 $\gamma$가 적용된 미래 방문 상태 분포인 Successor Measure (SM) 입니다.
+
+$$M(s, g) = (1-\gamma) \delta_{s'} + \gamma \mathcal{T} M(s', g)$$
+
 여기서 $\mathcal{T}$는 전이 연산자입니다. 즉, 현재 상태 $s$의 미래 분포는 "바로 다음 상태 $s'$"과 "그 $s'$에서의 미래 분포"의 가중 합으로 정의됩니다.
 #### 2.2 Bootstrapped Target Construction 
 Flow Matching 모델을 학습시키기 위해 타겟 샘플 $Z$를 생성해야 합니다. TD-Flow는 이를 위해 **Bootstrapping**을 사용합니다.
@@ -16,8 +19,11 @@ Flow Matching 모델을 학습시키기 위해 타겟 샘플 $Z$를 생성해야
 1. 확률 $1-\gamma$: 실제 데이터의 다음 상태 $z' = \phi(s')$ 그 자체.
 2. 확률 $\gamma$: 현재 모델 $v_\theta$를 사용하여 $z'$에서 더 미래로 진행시킨 예측값.
 이를 수식으로 표현하면, 타겟 분포 $\Pi_{target}$은 다음과 같습니다:
+
 $$Z \sim (1-\gamma)\delta_{z'} + \gamma \delta_{\tilde{z}_{future}}$$
+
 여기서 $\tilde{z}_{future}$는 현재 학습 중인 Vector Field $v_\theta$를 따라 $z'$에서 시간 $t=1$까지 적분(ODE Solve)한 결과입니다.
+
 $$\tilde{z}_{future} = z' + \int_{0}^{1} v_\theta(z(\tau), \tau | z', z_g) d\tau, \quad \text{where } z(0)=z'$$
 
 ### 2.3 Condition Adaptation (Action $\to$ Goal)
@@ -58,7 +64,9 @@ $$\tilde{z}_{future} = z' + \int_{0}^{1} v_\theta(z(\tau), \tau | z', z_g) d\tau
 TD-Flow의 핵심인 Bootstrapping을 통해 타겟 $Z$를 생성합니다.
 * **확률 $1-\gamma$**: 타겟을 다음 상태인 $z'$으로 설정합니다 ($Z = z'$).
 * **확률 $\gamma$**: 현재 모델 $v_\theta$를 사용하여 $z'$에서 더 미래로 진행시킨 예측값 $\tilde{z}_{future}$를 타겟으로 설정합니다.
-  $$\tilde{z}_{future} = \text{ODE\_Solve}(v_\theta, \text{start}=z', \text{cond}=[z', z_g])$$
+
+$$\tilde{z}_{future} = \text{ODE\_Solve}(v_\theta, \text{start}=z', \text{cond}=[z', z_g])$$
+
 * **참고**: $s=g$일 때의 Absorbing State 처리 로직은 선택 사항이며, 자세한 내용은 구현 디테일(4.3절)에서 설명합니다.
 
 #### Step 4: Flow Matching Loss 계산
